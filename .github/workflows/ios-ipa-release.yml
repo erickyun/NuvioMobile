@@ -1,0 +1,198 @@
+name: Build iOS IPA and Release
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "23 4 * * *"
+  push:
+    branches:
+      - cmp-rewrite
+    paths:
+      - .github/workflows/ios-ipa-release.yml
+      - .github/trigger-ios-build.txt
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ios-ipa-release
+  cancel-in-progress: false
+
+jobs:
+  build-and-release:
+    name: Build unsigned IPA
+    runs-on: macos-15
+    timeout-minutes: 90
+    env:
+      NUVIO_IOS_DISTRIBUTION: appstore
+
+    steps:
+      - name: Checkout latest upstream source
+        uses: actions/checkout@v4
+        with:
+          repository: NuvioMedia/NuvioMobile
+          ref: cmp-rewrite
+          fetch-depth: 1
+          submodules: recursive
+          lfs: true
+          persist-credentials: false
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: Select Xcode 16.4
+        run: sudo xcode-select -s /Applications/Xcode_16.4.app/Contents/Developer
+
+      - name: Read version information
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          VERSION_FILE="iosApp/Configuration/Version.xcconfig"
+          VERSION="$(sed -n 's/^MARKETING_VERSION[[:space:]]*=[[:space:]]*//p' "$VERSION_FILE" | tr -d '\r')"
+          BUILD="$(sed -n 's/^CURRENT_PROJECT_VERSION[[:space:]]*=[[:space:]]*//p' "$VERSION_FILE" | tr -d '\r')"
+          SHORT_SHA="$(git rev-parse --short=8 HEAD)"
+
+          test -n "$VERSION"
+          test -n "$BUILD"
+
+          TAG="ios-v${VERSION}-b${BUILD}-${SHORT_SHA}"
+          IPA_NAME="Nuvio-${VERSION}-build-${BUILD}-unsigned.ipa"
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "build=$BUILD" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "ipa_name=$IPA_NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Check whether this upstream commit is already released
+        id: release_check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Release $RELEASE_TAG already exists; nothing to rebuild."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Prepare build environment
+        if: steps.release_check.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x gradlew
+          git submodule sync --recursive
+          git submodule update --init --recursive --depth 1
+          xcodebuild -version
+          xcodebuild -list -project iosApp/iosApp.xcodeproj
+          java -version
+          ./gradlew --version
+
+      - name: Build unsigned iOS application
+        if: steps.release_check.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build
+
+          set -o pipefail
+          xcodebuild \
+            -project iosApp/iosApp.xcodeproj \
+            -scheme iosApp \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination "generic/platform=iOS" \
+            -derivedDataPath "$PWD/build/DerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            DEVELOPMENT_TEAM="" \
+            COMPILER_INDEX_STORE_ENABLE=NO \
+            clean build | tee build/xcodebuild.log
+
+      - name: Package IPA
+        if: steps.release_check.outputs.skip != 'true'
+        id: package
+        env:
+          IPA_NAME: ${{ steps.version.outputs.ipa_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PRODUCTS_DIR="$PWD/build/DerivedData/Build/Products/Release-iphoneos"
+          APP_PATH="$(find "$PRODUCTS_DIR" -maxdepth 1 -type d -name '*.app' -print -quit)"
+
+          if [[ -z "$APP_PATH" || ! -d "$APP_PATH" ]]; then
+            echo "No .app bundle found under $PRODUCTS_DIR" >&2
+            find "$PWD/build/DerivedData/Build/Products" -maxdepth 4 -print || true
+            exit 1
+          fi
+
+          OUTPUT_DIR="$PWD/output"
+          PAYLOAD_DIR="$OUTPUT_DIR/Payload"
+          mkdir -p "$PAYLOAD_DIR"
+          ditto "$APP_PATH" "$PAYLOAD_DIR/$(basename "$APP_PATH")"
+
+          find "$PAYLOAD_DIR" -type d -name _CodeSignature -prune -exec rm -rf {} + || true
+          find "$PAYLOAD_DIR" -type f -name embedded.mobileprovision -delete || true
+
+          (
+            cd "$OUTPUT_DIR"
+            /usr/bin/zip -qry "$IPA_NAME" Payload
+            shasum -a 256 "$IPA_NAME" > "$IPA_NAME.sha256"
+          )
+
+          echo "ipa_path=$OUTPUT_DIR/$IPA_NAME" >> "$GITHUB_OUTPUT"
+          echo "sha_path=$OUTPUT_DIR/$IPA_NAME.sha256" >> "$GITHUB_OUTPUT"
+
+      - name: Upload workflow artifact
+        if: steps.release_check.outputs.skip != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Nuvio-iOS-${{ steps.version.outputs.version }}-${{ steps.version.outputs.build }}
+          path: |
+            ${{ steps.package.outputs.ipa_path }}
+            ${{ steps.package.outputs.sha_path }}
+            build/xcodebuild.log
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Create GitHub Release
+        if: steps.release_check.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+          VERSION: ${{ steps.version.outputs.version }}
+          BUILD_NUMBER: ${{ steps.version.outputs.build }}
+          IPA_PATH: ${{ steps.package.outputs.ipa_path }}
+          SHA_PATH: ${{ steps.package.outputs.sha_path }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cat > release-notes.md <<EOF
+          Automated iOS build from NuvioMedia/NuvioMobile branch \`cmp-rewrite\`.
+
+          Version: **$VERSION**  
+          Build: **$BUILD_NUMBER**  
+          Upstream commit: **$(git rev-parse HEAD)**
+
+          The IPA is **unsigned**. Install it by signing it with your own Apple ID/certificate using SideStore, AltStore, Sideloadly, TrollStore (supported devices only), or another compatible signing method.
+          EOF
+
+          gh release create "$RELEASE_TAG" \
+            "$IPA_PATH" \
+            "$SHA_PATH" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Nuvio iOS $VERSION (build $BUILD_NUMBER)" \
+            --notes-file release-notes.md \
+            --latest
