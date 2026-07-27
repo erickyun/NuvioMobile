@@ -28,14 +28,27 @@ jobs:
 
     steps:
       - name: Checkout latest upstream source
-        uses: actions/checkout@v5
-        with:
-          repository: NuvioMedia/NuvioMobile
-          ref: cmp-rewrite
-          fetch-depth: 1
-          submodules: false
-          lfs: false
-          persist-credentials: false
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git init .
+          git remote add upstream https://github.com/NuvioMedia/NuvioMobile.git
+          git -c submodule.recurse=false fetch \
+            --depth 1 \
+            --no-tags \
+            --no-recurse-submodules \
+            upstream cmp-rewrite
+          git -c submodule.recurse=false checkout --detach FETCH_HEAD
+
+          # Avoid the broken/stale gitlinks in upstream. MPVKit is the only
+          # external repository required by the iOS Xcode project.
+          rm -rf MPVKit
+          git clone \
+            --depth 1 \
+            --branch Nuvio \
+            --single-branch \
+            https://github.com/NuvioMedia/MPVKit.git MPVKit
 
       - name: Set up Java 17
         uses: actions/setup-java@v4
@@ -90,12 +103,6 @@ jobs:
         run: |
           set -euo pipefail
           chmod +x gradlew
-
-          # Upstream contains stale gitlinks that are not declared in .gitmodules.
-          # Only MPVKit is required by the iOS Xcode project, so initialize it explicitly.
-          git submodule sync -- MPVKit
-          git submodule update --init --depth 1 MPVKit
-
           xcodebuild -version
           xcodebuild -list -project iosApp/iosApp.xcodeproj
           java -version
