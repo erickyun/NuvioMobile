@@ -57,8 +57,8 @@ jobs:
           java-version: "17"
           cache: gradle
 
-      - name: Select Xcode 16.4
-        run: sudo xcode-select -s /Applications/Xcode_16.4.app/Contents/Developer
+      - name: Select Xcode 26.3
+        run: sudo xcode-select -s /Applications/Xcode_26.3.app/Contents/Developer
 
       - name: Read version information
         id: version
@@ -135,7 +135,7 @@ jobs:
             CODE_SIGN_IDENTITY="" \
             DEVELOPMENT_TEAM="" \
             COMPILER_INDEX_STORE_ENABLE=NO \
-            clean build | tee build/xcodebuild.log
+            build | tee build/xcodebuild.log
 
       - name: Upload failed Xcode log
         if: always() && steps.ios_build.outcome == 'failure'
