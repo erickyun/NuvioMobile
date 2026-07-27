@@ -103,6 +103,11 @@ jobs:
         run: |
           set -euo pipefail
           chmod +x gradlew
+
+          # Gradle 9 validates the optional @InputFile path before task execution.
+          # An empty file is valid; runtime values keep their built-in defaults.
+          touch local.properties
+
           xcodebuild -version
           xcodebuild -list -project iosApp/iosApp.xcodeproj
           java -version
