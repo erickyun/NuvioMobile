@@ -28,13 +28,13 @@ jobs:
 
     steps:
       - name: Checkout latest upstream source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: NuvioMedia/NuvioMobile
           ref: cmp-rewrite
           fetch-depth: 1
-          submodules: recursive
-          lfs: true
+          submodules: false
+          lfs: false
           persist-credentials: false
 
       - name: Set up Java 17
@@ -90,8 +90,12 @@ jobs:
         run: |
           set -euo pipefail
           chmod +x gradlew
-          git submodule sync --recursive
-          git submodule update --init --recursive --depth 1
+
+          # Upstream contains stale gitlinks that are not declared in .gitmodules.
+          # Only MPVKit is required by the iOS Xcode project, so initialize it explicitly.
+          git submodule sync -- MPVKit
+          git submodule update --init --depth 1 MPVKit
+
           xcodebuild -version
           xcodebuild -list -project iosApp/iosApp.xcodeproj
           java -version
