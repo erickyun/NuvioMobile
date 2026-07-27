@@ -41,8 +41,8 @@ jobs:
             upstream cmp-rewrite
           git -c submodule.recurse=false checkout --detach FETCH_HEAD
 
-          # Avoid the broken/stale gitlinks in upstream. MPVKit is the only
-          # external repository required by the iOS Xcode project.
+          # Upstream contains stale gitlinks that are absent from .gitmodules.
+          # MPVKit is the only external repository required by the iOS project.
           rm -rf MPVKit
           git clone \
             --depth 1 \
@@ -51,7 +51,7 @@ jobs:
             https://github.com/NuvioMedia/MPVKit.git MPVKit
 
       - name: Set up Java 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
@@ -109,7 +109,9 @@ jobs:
           ./gradlew --version
 
       - name: Build unsigned iOS application
+        id: ios_build
         if: steps.release_check.outputs.skip != 'true'
+        continue-on-error: true
         shell: bash
         run: |
           set -euo pipefail
@@ -130,8 +132,66 @@ jobs:
             COMPILER_INDEX_STORE_ENABLE=NO \
             clean build | tee build/xcodebuild.log
 
+      - name: Upload failed Xcode log
+        if: always() && steps.ios_build.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Nuvio-iOS-failed-build-log
+          path: build/xcodebuild.log
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Report Xcode build errors
+        if: steps.ios_build.outcome == 'failure'
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          log_path = Path("build/xcodebuild.log")
+          text = log_path.read_text(errors="replace") if log_path.exists() else ""
+          patterns = (
+              r"\berror:",
+              r"\bfatal error:",
+              r"^e:",
+              r"FAILURE: Build failed",
+              r"Execution failed for task",
+              r"What went wrong:",
+              r"Undefined symbols",
+              r"^ld:",
+              r"Command .* failed",
+              r"BUILD FAILED",
+          )
+          matcher = re.compile("|".join(patterns), re.IGNORECASE)
+          lines = text.splitlines()
+          matches = []
+          for index, line in enumerate(lines):
+              if matcher.search(line):
+                  start = max(0, index - 2)
+                  end = min(len(lines), index + 4)
+                  matches.extend(lines[start:end])
+
+          if not matches:
+              matches = lines[-200:]
+
+          unique = []
+          seen = set()
+          for line in matches:
+              stripped = line.strip()
+              if stripped and stripped not in seen:
+                  seen.add(stripped)
+                  unique.append(stripped)
+
+          for line in unique[-120:]:
+              safe = line.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+              print(f"::error::{safe}")
+
+          raise SystemExit("Xcode build failed; see annotations and Nuvio-iOS-failed-build-log artifact.")
+          PY
+
       - name: Package IPA
-        if: steps.release_check.outputs.skip != 'true'
+        if: steps.release_check.outputs.skip != 'true' && steps.ios_build.outcome == 'success'
         id: package
         env:
           IPA_NAME: ${{ steps.version.outputs.ipa_name }}
@@ -166,7 +226,7 @@ jobs:
           echo "sha_path=$OUTPUT_DIR/$IPA_NAME.sha256" >> "$GITHUB_OUTPUT"
 
       - name: Upload workflow artifact
-        if: steps.release_check.outputs.skip != 'true'
+        if: steps.release_check.outputs.skip != 'true' && steps.ios_build.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: Nuvio-iOS-${{ steps.version.outputs.version }}-${{ steps.version.outputs.build }}
@@ -178,7 +238,7 @@ jobs:
           retention-days: 30
 
       - name: Create GitHub Release
-        if: steps.release_check.outputs.skip != 'true'
+        if: steps.release_check.outputs.skip != 'true' && steps.ios_build.outcome == 'success'
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ steps.version.outputs.tag }}
