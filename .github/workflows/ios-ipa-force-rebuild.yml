@@ -97,6 +97,85 @@ jobs:
             composeApp/src/fullCommonMain/kotlin/com/nuvio/app/features/trailer/TrailerPlaybackResolver.kt \
             "$APPSTORE_TRAILER_DIR/TrailerPlaybackResolver.ios.kt"
 
+          HERO_PLAYER_PATH="composeApp/src/iosAppStore/kotlin/com/nuvio/app/features/details/components/HeroTrailerPlayerSurface.ios.kt"
+          mkdir -p "$(dirname "$HERO_PLAYER_PATH")"
+          cat > "$HERO_PLAYER_PATH" <<'KOTLIN'
+          package com.nuvio.app.features.details.components
+
+          import androidx.compose.runtime.Composable
+          import androidx.compose.runtime.LaunchedEffect
+          import androidx.compose.runtime.getValue
+          import androidx.compose.runtime.mutableStateOf
+          import androidx.compose.runtime.remember
+          import androidx.compose.runtime.rememberUpdatedState
+          import androidx.compose.runtime.setValue
+          import androidx.compose.ui.Modifier
+          import com.nuvio.app.features.player.PlatformPlayerSurface
+          import com.nuvio.app.features.player.PlayerEngineController
+          import com.nuvio.app.features.player.PlayerResizeMode
+
+          @Composable
+          actual fun HeroTrailerPlayerSurface(
+              sourceUrl: String,
+              sourceAudioUrl: String?,
+              playWhenReady: Boolean,
+              muted: Boolean,
+              modifier: Modifier,
+              onReady: () -> Unit,
+              onEnded: () -> Unit,
+              onError: () -> Unit,
+          ) {
+              val latestOnReady = rememberUpdatedState(onReady)
+              val latestOnEnded = rememberUpdatedState(onEnded)
+              val latestOnError = rememberUpdatedState(onError)
+              var controller by remember(sourceUrl, sourceAudioUrl) {
+                  mutableStateOf<PlayerEngineController?>(null)
+              }
+              var readyReported by remember(sourceUrl, sourceAudioUrl) { mutableStateOf(false) }
+              var endedReported by remember(sourceUrl, sourceAudioUrl) { mutableStateOf(false) }
+              var errorReported by remember(sourceUrl, sourceAudioUrl) { mutableStateOf(false) }
+
+              LaunchedEffect(controller, muted) {
+                  controller?.setMuted(muted)
+              }
+
+              PlatformPlayerSurface(
+                  sourceUrl = sourceUrl,
+                  sourceAudioUrl = sourceAudioUrl,
+                  useYoutubeChunkedPlayback = true,
+                  modifier = modifier,
+                  playWhenReady = playWhenReady,
+                  resizeMode = PlayerResizeMode.Zoom,
+                  useNativeController = false,
+                  onControllerReady = { newController ->
+                      controller = newController
+                      newController.setMuted(muted)
+                  },
+                  onSnapshot = { snapshot ->
+                      if (
+                          !readyReported &&
+                          !snapshot.isLoading &&
+                          !snapshot.isEnded &&
+                          (snapshot.isPlaying || snapshot.durationMs > 0L)
+                      ) {
+                          readyReported = true
+                          latestOnReady.value()
+                      }
+                      if (!endedReported && snapshot.isEnded) {
+                          endedReported = true
+                          latestOnEnded.value()
+                      }
+                  },
+                  onError = { message ->
+                      if (!message.isNullOrBlank() && !errorReported) {
+                          errorReported = true
+                          latestOnError.value()
+                      }
+                  },
+              )
+          }
+          KOTLIN
+
           python3 <<'PY'
           from pathlib import Path
 
@@ -124,6 +203,7 @@ jobs:
           grep -q 'TrailerPlaybackMode.IN_APP' composeApp/src/iosAppStore/kotlin/com/nuvio/app/core/build/AppFeaturePolicy.ios.kt
           grep -q 'heroTrailerPlaybackSupported: Boolean = true' composeApp/src/iosAppStore/kotlin/com/nuvio/app/core/build/AppFeaturePolicy.ios.kt
           grep -q 'InAppYouTubeExtractor' "$APPSTORE_TRAILER_DIR/TrailerPlaybackResolver.ios.kt"
+          grep -q 'PlatformPlayerSurface' "$HERO_PLAYER_PATH"
           test -s "$APPSTORE_TRAILER_DIR/TrailerExtractionPlatform.ios.kt"
           echo "iOS automatic in-app trailer patch is ready."
 
