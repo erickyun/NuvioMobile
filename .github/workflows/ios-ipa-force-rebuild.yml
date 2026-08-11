@@ -19,7 +19,7 @@ jobs:
   build-and-release:
     name: Force build unsigned IPA
     runs-on: macos-15
-    timeout-minutes: 90
+    timeout-minutes: 240
     env:
       NUVIO_IOS_DISTRIBUTION: appstore
 
