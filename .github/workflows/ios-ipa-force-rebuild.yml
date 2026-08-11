@@ -17,7 +17,7 @@ concurrency:
 
 jobs:
   build-and-release:
-    name: Force build unsigned IPA
+    name: Force build unsigned IPA with Auto Trailer
     runs-on: macos-15
     timeout-minutes: 240
     env:
@@ -69,13 +69,63 @@ jobs:
           test -n "$VERSION"
           test -n "$BUILD"
 
-          TAG="ios-v${VERSION}-b${BUILD}-${SHORT_SHA}-rebuild-${GITHUB_RUN_NUMBER}"
-          IPA_NAME="Nuvio-${VERSION}-build-${BUILD}-rebuild-${GITHUB_RUN_NUMBER}-unsigned.ipa"
+          TAG="ios-v${VERSION}-b${BUILD}-${SHORT_SHA}-autotrailer-${GITHUB_RUN_NUMBER}"
+          IPA_NAME="Nuvio-${VERSION}-build-${BUILD}-autotrailer-${GITHUB_RUN_NUMBER}-unsigned.ipa"
 
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "build=$BUILD" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "ipa_name=$IPA_NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Enable iOS in-app automatic trailers
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APPSTORE_TRAILER_DIR="composeApp/src/iosAppStore/kotlin/com/nuvio/app/features/trailer"
+          mkdir -p "$APPSTORE_TRAILER_DIR"
+
+          cp \
+            composeApp/src/fullCommonMain/kotlin/com/nuvio/app/features/trailer/InAppYouTubeExtractor.kt \
+            "$APPSTORE_TRAILER_DIR/InAppYouTubeExtractor.kt"
+
+          cp \
+            composeApp/src/iosFull/kotlin/com/nuvio/app/features/trailer/TrailerExtractionPlatform.ios.kt \
+            "$APPSTORE_TRAILER_DIR/TrailerExtractionPlatform.ios.kt"
+
+          cp \
+            composeApp/src/fullCommonMain/kotlin/com/nuvio/app/features/trailer/TrailerPlaybackResolver.kt \
+            "$APPSTORE_TRAILER_DIR/TrailerPlaybackResolver.ios.kt"
+
+          python3 <<'PY'
+          from pathlib import Path
+
+          policy_path = Path("composeApp/src/iosAppStore/kotlin/com/nuvio/app/core/build/AppFeaturePolicy.ios.kt")
+          policy = policy_path.read_text(encoding="utf-8")
+          policy = policy.replace(
+              "actual val trailerPlaybackMode: TrailerPlaybackMode = TrailerPlaybackMode.EXTERNAL",
+              "actual val trailerPlaybackMode: TrailerPlaybackMode = TrailerPlaybackMode.IN_APP",
+          )
+          policy = policy.replace(
+              "actual val heroTrailerPlaybackSupported: Boolean = false",
+              "actual val heroTrailerPlaybackSupported: Boolean = true",
+          )
+          policy_path.write_text(policy, encoding="utf-8")
+
+          details_path = Path("composeApp/src/commonMain/kotlin/com/nuvio/app/features/details/MetaDetailsScreen.kt")
+          details = details_path.read_text(encoding="utf-8")
+          old = """val heroTrailerPlaybackEnabled = AppFeaturePolicy.heroTrailerPlaybackSupported &&\n                    inAppTrailerPlaybackEnabled &&\n                    metaScreenSettingsUiState.heroTrailerPlayback"""
+          new = """val heroTrailerPlaybackEnabled = AppFeaturePolicy.heroTrailerPlaybackSupported &&\n                    inAppTrailerPlaybackEnabled"""
+          if old not in details:
+              raise SystemExit("Could not locate hero trailer autoplay gate in MetaDetailsScreen.kt")
+          details_path.write_text(details.replace(old, new, 1), encoding="utf-8")
+          PY
+
+          grep -q 'TrailerPlaybackMode.IN_APP' composeApp/src/iosAppStore/kotlin/com/nuvio/app/core/build/AppFeaturePolicy.ios.kt
+          grep -q 'heroTrailerPlaybackSupported: Boolean = true' composeApp/src/iosAppStore/kotlin/com/nuvio/app/core/build/AppFeaturePolicy.ios.kt
+          grep -q 'InAppYouTubeExtractor' "$APPSTORE_TRAILER_DIR/TrailerPlaybackResolver.ios.kt"
+          test -s "$APPSTORE_TRAILER_DIR/TrailerExtractionPlatform.ios.kt"
+          echo "iOS automatic in-app trailer patch is ready."
 
       - name: Import production Supabase config from official Android release
         env:
@@ -138,7 +188,6 @@ jobs:
           publishable_pattern = re.compile(rb"sb_publishable_[A-Za-z0-9_-]{16,}")
           keys.extend(match.group(0).decode("ascii") for match in publishable_pattern.finditer(blob))
           keys = unique(keys)
-
           if not keys:
               raise SystemExit("Could not find a public Supabase anon/publishable key in official APK")
 
@@ -155,10 +204,8 @@ jobs:
                   continue
               if "supabase" not in host and "nuvio" not in host:
                   continue
-              base = f"{parsed.scheme}://{parsed.netloc}".rstrip("/")
-              bases.append(base)
+              bases.append(f"{parsed.scheme}://{parsed.netloc}".rstrip("/"))
           bases = unique(bases)
-
           if not bases:
               raise SystemExit("Could not find candidate Nuvio/Supabase endpoints in official APK")
 
@@ -166,9 +213,8 @@ jobs:
           selected_key = None
           for key in keys:
               for base in bases:
-                  endpoint = base + "/auth/v1/settings"
                   request = urllib.request.Request(
-                      endpoint,
+                      base + "/auth/v1/settings",
                       headers={
                           "apikey": key,
                           "Authorization": "Bearer " + key,
@@ -196,20 +242,16 @@ jobs:
 
           primary = working[0]
           fallback = working[1] if len(working) > 1 else ""
-
           with open(output_path, "w", encoding="utf-8") as output:
               output.write(f"NUVIO_SUPABASE_URL={primary}\n")
               output.write(f"NUVIO_SUPABASE_ANON_KEY={selected_key}\n")
               output.write(f"NUVIO_SUPABASE_FALLBACK_URL={fallback}\n")
-
-          key_kind = "publishable" if selected_key.startswith("sb_publishable_") else "anon-jwt"
-          print(f"Validated production Supabase config from official APK: primary={primary}, fallback={fallback or '(none)'}, key={key_kind}")
+          print("Validated production Supabase config from official APK")
           PY
 
           set -a
           source "$CONFIG_ENV"
           set +a
-
           echo "::add-mask::$NUVIO_SUPABASE_ANON_KEY"
 
           cat > local.properties <<EOF
@@ -262,7 +304,7 @@ jobs:
         if: always() && steps.ios_build.outcome == 'failure'
         uses: actions/upload-artifact@v4
         with:
-          name: Nuvio-iOS-force-rebuild-failed-log
+          name: Nuvio-iOS-autotrailer-failed-log
           path: build/xcodebuild.log
           if-no-files-found: error
           retention-days: 30
@@ -271,7 +313,7 @@ jobs:
         if: steps.ios_build.outcome == 'failure'
         shell: bash
         run: |
-          tail -n 200 build/xcodebuild.log || true
+          tail -n 250 build/xcodebuild.log || true
           exit 1
 
       - name: Package IPA
@@ -285,10 +327,8 @@ jobs:
 
           PRODUCTS_DIR="$PWD/build/DerivedData/Build/Products/Release-iphoneos"
           APP_PATH="$(find "$PRODUCTS_DIR" -maxdepth 1 -type d -name '*.app' -print -quit)"
-
           if [[ -z "$APP_PATH" || ! -d "$APP_PATH" ]]; then
             echo "No .app bundle found under $PRODUCTS_DIR" >&2
-            find "$PWD/build/DerivedData/Build/Products" -maxdepth 4 -print || true
             exit 1
           fi
 
@@ -296,7 +336,6 @@ jobs:
           PAYLOAD_DIR="$OUTPUT_DIR/Payload"
           mkdir -p "$PAYLOAD_DIR"
           ditto "$APP_PATH" "$PAYLOAD_DIR/$(basename "$APP_PATH")"
-
           find "$PAYLOAD_DIR" -type d -name _CodeSignature -prune -exec rm -rf {} + || true
           find "$PAYLOAD_DIR" -type f -name embedded.mobileprovision -delete || true
 
@@ -313,7 +352,7 @@ jobs:
         if: steps.ios_build.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
-          name: Nuvio-iOS-force-${{ steps.version.outputs.version }}-${{ steps.version.outputs.build }}-${{ github.run_number }}
+          name: Nuvio-iOS-autotrailer-${{ steps.version.outputs.version }}-${{ steps.version.outputs.build }}-${{ github.run_number }}
           path: |
             ${{ steps.package.outputs.ipa_path }}
             ${{ steps.package.outputs.sha_path }}
@@ -335,14 +374,18 @@ jobs:
           set -euo pipefail
 
           cat > release-notes.md <<EOF
-          Forced iOS rebuild from the latest NuvioMedia/NuvioMobile \`cmp-rewrite\` upstream source.
+          Custom iOS Auto Trailer build from the latest NuvioMedia/NuvioMobile \`cmp-rewrite\` source.
 
           Version: **$VERSION**  
           Build: **$BUILD_NUMBER**  
           Upstream commit: **$(git rev-parse HEAD)**  
           Workflow run: **$GITHUB_RUN_NUMBER**
 
-          Production Supabase auth configuration was imported automatically from the matching official Nuvio Android release.
+          Changes in this IPA:
+          - Production Supabase login configuration included.
+          - iOS in-app YouTube trailer extraction enabled.
+          - Hero trailer playback enabled and set to autoplay on details pages when a trailer is available.
+          - The rest of the iOS App Store distribution policy remains unchanged.
 
           The IPA is **unsigned**. Sign it with your own Apple ID/certificate before sideloading.
           EOF
@@ -351,6 +394,6 @@ jobs:
             "$IPA_PATH" \
             "$SHA_PATH" \
             --repo "$GITHUB_REPOSITORY" \
-            --title "Nuvio iOS $VERSION (build $BUILD_NUMBER) - rebuild $GITHUB_RUN_NUMBER" \
+            --title "Nuvio iOS $VERSION (build $BUILD_NUMBER) - Auto Trailer $GITHUB_RUN_NUMBER" \
             --notes-file release-notes.md \
             --latest
