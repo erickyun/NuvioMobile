@@ -198,14 +198,30 @@ jobs:
           if old not in details:
               raise SystemExit("Could not locate hero trailer autoplay gate in MetaDetailsScreen.kt")
           details_path.write_text(details.replace(old, new, 1), encoding="utf-8")
+
+          bridge_path = Path("iosApp/iosApp/Player/MPVPlayerBridge.swift")
+          bridge = bridge_path.read_text(encoding="utf-8")
+          old_frame = """        var targetFrame = view.frame
+          if targetFrame.size != size {
+              targetFrame.size = size
+              view.frame = targetFrame
+          }"""
+          new_frame = """        let targetFrame = CGRect(origin: .zero, size: size)
+          if view.frame != targetFrame {
+              view.frame = targetFrame
+          }"""
+          if old_frame not in bridge:
+              raise SystemExit("Could not locate externally managed MPV view frame code")
+          bridge_path.write_text(bridge.replace(old_frame, new_frame, 1), encoding="utf-8")
           PY
 
           grep -q 'TrailerPlaybackMode.IN_APP' composeApp/src/iosAppStore/kotlin/com/nuvio/app/core/build/AppFeaturePolicy.ios.kt
           grep -q 'heroTrailerPlaybackSupported: Boolean = true' composeApp/src/iosAppStore/kotlin/com/nuvio/app/core/build/AppFeaturePolicy.ios.kt
           grep -q 'InAppYouTubeExtractor' "$APPSTORE_TRAILER_DIR/TrailerPlaybackResolver.ios.kt"
           grep -q 'PlatformPlayerSurface' "$HERO_PLAYER_PATH"
+          grep -q 'let targetFrame = CGRect(origin: .zero, size: size)' iosApp/iosApp/Player/MPVPlayerBridge.swift
           test -s "$APPSTORE_TRAILER_DIR/TrailerExtractionPlatform.ios.kt"
-          echo "iOS automatic in-app trailer patch is ready."
+          echo "iOS automatic in-app trailer patch is ready and MPV surface is centered."
 
       - name: Import production Supabase config from official Android release
         env:
@@ -465,6 +481,7 @@ jobs:
           - Production Supabase login configuration included.
           - iOS in-app YouTube trailer extraction enabled.
           - Hero trailer playback enabled and set to autoplay on details pages when a trailer is available.
+          - Hero MPV surface is forced to origin (0,0) at the exact Compose-managed size to avoid one-sided black gaps.
           - The rest of the iOS App Store distribution policy remains unchanged.
 
           The IPA is **unsigned**. Sign it with your own Apple ID/certificate before sideloading.
