@@ -1,0 +1,19 @@
+name: Cancel current iOS Full P2P build
+
+on:
+  push:
+    branches:
+      - cmp-rewrite
+    paths:
+      - .github/workflows/cancel-ios-full.yml
+  workflow_dispatch:
+
+concurrency:
+  group: ios-nuvio-custom-full
+  cancel-in-progress: true
+
+jobs:
+  canceler:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Cancelling any in-progress iOS Full/P2P build via concurrency."
