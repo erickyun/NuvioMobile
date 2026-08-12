@@ -102,6 +102,8 @@ jobs:
           cat > "$HERO_PLAYER_PATH" <<'KOTLIN'
           package com.nuvio.app.features.details.components
 
+          import androidx.compose.foundation.layout.Box
+          import androidx.compose.foundation.layout.fillMaxSize
           import androidx.compose.runtime.Composable
           import androidx.compose.runtime.LaunchedEffect
           import androidx.compose.runtime.getValue
@@ -139,40 +141,45 @@ jobs:
                   controller?.setMuted(muted)
               }
 
-              PlatformPlayerSurface(
-                  sourceUrl = sourceUrl,
-                  sourceAudioUrl = sourceAudioUrl,
-                  useYoutubeChunkedPlayback = true,
-                  modifier = modifier,
-                  playWhenReady = playWhenReady,
-                  resizeMode = PlayerResizeMode.Zoom,
-                  useNativeController = false,
-                  onControllerReady = { newController ->
-                      controller = newController
-                      newController.setMuted(muted)
-                  },
-                  onSnapshot = { snapshot ->
-                      if (
-                          !readyReported &&
-                          !snapshot.isLoading &&
-                          !snapshot.isEnded &&
-                          (snapshot.isPlaying || snapshot.durationMs > 0L)
-                      ) {
-                          readyReported = true
-                          latestOnReady.value()
-                      }
-                      if (!endedReported && snapshot.isEnded) {
-                          endedReported = true
-                          latestOnEnded.value()
-                      }
-                  },
-                  onError = { message ->
-                      if (!message.isNullOrBlank() && !errorReported) {
-                          errorReported = true
-                          latestOnError.value()
-                      }
-                  },
-              )
+              // Keep Compose transforms/cropping on a normal Compose layout node.
+              // Passing the hero graphicsLayer modifier straight into UIKitViewController
+              // leaves the embedded MPV surface with a one-sided gap on iOS.
+              Box(modifier = modifier) {
+                  PlatformPlayerSurface(
+                      sourceUrl = sourceUrl,
+                      sourceAudioUrl = sourceAudioUrl,
+                      useYoutubeChunkedPlayback = true,
+                      modifier = Modifier.fillMaxSize(),
+                      playWhenReady = playWhenReady,
+                      resizeMode = PlayerResizeMode.Zoom,
+                      useNativeController = false,
+                      onControllerReady = { newController ->
+                          controller = newController
+                          newController.setMuted(muted)
+                      },
+                      onSnapshot = { snapshot ->
+                          if (
+                              !readyReported &&
+                              !snapshot.isLoading &&
+                              !snapshot.isEnded &&
+                              (snapshot.isPlaying || snapshot.durationMs > 0L)
+                          ) {
+                              readyReported = true
+                              latestOnReady.value()
+                          }
+                          if (!endedReported && snapshot.isEnded) {
+                              endedReported = true
+                              latestOnEnded.value()
+                          }
+                      },
+                      onError = { message ->
+                          if (!message.isNullOrBlank() && !errorReported) {
+                              errorReported = true
+                              latestOnError.value()
+                          }
+                      },
+                  )
+              }
           }
           KOTLIN
 
@@ -222,10 +229,11 @@ jobs:
           grep -q 'TrailerPlaybackMode.IN_APP' composeApp/src/iosAppStore/kotlin/com/nuvio/app/core/build/AppFeaturePolicy.ios.kt
           grep -q 'heroTrailerPlaybackSupported: Boolean = true' composeApp/src/iosAppStore/kotlin/com/nuvio/app/core/build/AppFeaturePolicy.ios.kt
           grep -q 'InAppYouTubeExtractor' "$APPSTORE_TRAILER_DIR/TrailerPlaybackResolver.ios.kt"
-          grep -q 'PlatformPlayerSurface' "$HERO_PLAYER_PATH"
+          grep -q 'Box(modifier = modifier)' "$HERO_PLAYER_PATH"
+          grep -q 'modifier = Modifier.fillMaxSize()' "$HERO_PLAYER_PATH"
           grep -q 'let targetFrame = CGRect(origin: .zero, size: size)' iosApp/iosApp/Player/MPVPlayerBridge.swift
           test -s "$APPSTORE_TRAILER_DIR/TrailerExtractionPlatform.ios.kt"
-          echo "iOS automatic in-app trailer patch is ready and MPV surface is centered."
+          echo "iOS automatic in-app trailer patch is ready with wrapped MPV hero surface."
 
       - name: Import production Supabase config from official Android release
         env:
@@ -485,7 +493,7 @@ jobs:
           - Production Supabase login configuration included.
           - iOS in-app YouTube trailer extraction enabled.
           - Hero trailer playback enabled and set to autoplay on details pages when a trailer is available.
-          - Hero MPV surface is forced to origin (0,0) at the exact Compose-managed size to avoid one-sided black gaps.
+          - Hero MPV UIKit surface is wrapped by a full-size Compose layer before hero scaling/cropping to avoid one-sided black gaps.
           - The rest of the iOS App Store distribution policy remains unchanged.
 
           The IPA is **unsigned**. Sign it with your own Apple ID/certificate before sideloading.
