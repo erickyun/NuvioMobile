@@ -1,0 +1,249 @@
+name: Build iOS Auto Trailer V2 IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - cmp-rewrite
+    paths:
+      - .github/workflows/ios-ipa-autotrailer-v2.yml
+      - scripts/patch_ios_autotrailer_v2.py
+      - scripts/extract_official_supabase.py
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ios-autotrailer-v2
+  cancel-in-progress: false
+
+jobs:
+  build-and-release:
+    name: Build unsigned iOS Auto Trailer V2 IPA
+    runs-on: macos-15
+    timeout-minutes: 240
+    env:
+      NUVIO_IOS_DISTRIBUTION: appstore
+
+    steps:
+      - name: Checkout fork helpers
+        uses: actions/checkout@v4
+        with:
+          ref: cmp-rewrite
+          fetch-depth: 1
+
+      - name: Preserve helper scripts
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp scripts/patch_ios_autotrailer_v2.py "$RUNNER_TEMP/patch_ios_autotrailer_v2.py"
+          cp scripts/extract_official_supabase.py "$RUNNER_TEMP/extract_official_supabase.py"
+
+      - name: Checkout latest upstream source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git remote remove upstream 2>/dev/null || true
+          git remote add upstream https://github.com/NuvioMedia/NuvioMobile.git
+          git -c submodule.recurse=false fetch --depth 1 --no-tags --no-recurse-submodules upstream cmp-rewrite
+          git -c submodule.recurse=false checkout --detach FETCH_HEAD
+
+          rm -rf MPVKit
+          git clone --depth 1 --branch Nuvio --single-branch https://github.com/NuvioMedia/MPVKit.git MPVKit
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: Select Xcode 26.3
+        run: sudo xcode-select -s /Applications/Xcode_26.3.app/Contents/Developer
+
+      - name: Read version information
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION_FILE="iosApp/Configuration/Version.xcconfig"
+          VERSION="$(sed -n 's/^MARKETING_VERSION[[:space:]]*=[[:space:]]*//p' "$VERSION_FILE" | tr -d '\r')"
+          BUILD="$(sed -n 's/^CURRENT_PROJECT_VERSION[[:space:]]*=[[:space:]]*//p' "$VERSION_FILE" | tr -d '\r')"
+          UPSTREAM_SHA="$(git rev-parse HEAD)"
+          SHORT_SHA="$(git rev-parse --short=8 HEAD)"
+          test -n "$VERSION"
+          test -n "$BUILD"
+          TAG="ios-v${VERSION}-b${BUILD}-${SHORT_SHA}-autotrailer-v2-${GITHUB_RUN_NUMBER}"
+          IPA_NAME="Nuvio-${VERSION}-build-${BUILD}-autotrailer-v2-${GITHUB_RUN_NUMBER}-unsigned.ipa"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "build=$BUILD" >> "$GITHUB_OUTPUT"
+          echo "upstream_sha=$UPSTREAM_SHA" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "ipa_name=$IPA_NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Apply isolated iOS hero trailer patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 "$RUNNER_TEMP/patch_ios_autotrailer_v2.py"
+          grep -q 'NuvioPlayerBridgeFactory.create()' composeApp/src/iosAppStore/kotlin/com/nuvio/app/features/details/components/HeroTrailerPlayerSurface.ios.kt
+          if grep -v '^ *//' composeApp/src/iosAppStore/kotlin/com/nuvio/app/features/details/components/HeroTrailerPlayerSurface.ios.kt | grep -q 'syncVideoSurfaceLayout'; then
+            echo 'Dedicated hero surface unexpectedly uses syncVideoSurfaceLayout' >&2
+            exit 1
+          fi
+
+      - name: Import production Supabase config from official Android release
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK="$RUNNER_TEMP/nuvio-official-${VERSION}.apk"
+          CONFIG_ENV="$RUNNER_TEMP/nuvio-supabase.env"
+          curl --fail --location --retry 5 --retry-all-errors \
+            "https://github.com/NuvioMedia/NuvioMobile/releases/download/${VERSION}/androidApp-full-arm64-v8a-release.apk" \
+            --output "$APK"
+          python3 "$RUNNER_TEMP/extract_official_supabase.py" "$APK" "$CONFIG_ENV"
+          set -a
+          source "$CONFIG_ENV"
+          set +a
+          echo "::add-mask::$NUVIO_SUPABASE_ANON_KEY"
+          cat > local.properties <<EOF
+          NUVIO_SUPABASE_URL=$NUVIO_SUPABASE_URL
+          NUVIO_SUPABASE_ANON_KEY=$NUVIO_SUPABASE_ANON_KEY
+          NUVIO_SUPABASE_FALLBACK_URL=$NUVIO_SUPABASE_FALLBACK_URL
+          NUVIO_IOS_DISTRIBUTION=appstore
+          EOF
+          grep -Eq '^NUVIO_SUPABASE_URL=https://.+' local.properties
+          grep -Eq '^NUVIO_SUPABASE_ANON_KEY=.+' local.properties
+
+      - name: Restore Xcode DerivedData cache
+        uses: actions/cache@v4
+        with:
+          path: build/DerivedData
+          key: nuvio-ios-autotrailer-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.version.outputs.upstream_sha }}
+
+      - name: Prepare build environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x gradlew
+          xcodebuild -version
+          xcodebuild -list -project iosApp/iosApp.xcodeproj
+          java -version
+          ./gradlew --version
+
+      - name: Build unsigned iOS application
+        id: ios_build
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build
+          set -o pipefail
+          xcodebuild \
+            -project iosApp/iosApp.xcodeproj \
+            -scheme iosApp \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination "generic/platform=iOS" \
+            -derivedDataPath "$PWD/build/DerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            DEVELOPMENT_TEAM="" \
+            COMPILER_INDEX_STORE_ENABLE=NO \
+            build | tee build/xcodebuild.log
+
+      - name: Upload failed Xcode log
+        if: always() && steps.ios_build.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Nuvio-iOS-autotrailer-v2-failed-log
+          path: build/xcodebuild.log
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Fail when Xcode build failed
+        if: steps.ios_build.outcome == 'failure'
+        shell: bash
+        run: |
+          tail -n 300 build/xcodebuild.log || true
+          exit 1
+
+      - name: Package IPA
+        if: steps.ios_build.outcome == 'success'
+        id: package
+        env:
+          IPA_NAME: ${{ steps.version.outputs.ipa_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          PRODUCTS_DIR="$PWD/build/DerivedData/Build/Products/Release-iphoneos"
+          APP_PATH="$(find "$PRODUCTS_DIR" -maxdepth 1 -type d -name '*.app' -print -quit)"
+          test -n "$APP_PATH"
+          test -d "$APP_PATH"
+          OUTPUT_DIR="$PWD/output"
+          PAYLOAD_DIR="$OUTPUT_DIR/Payload"
+          rm -rf "$PAYLOAD_DIR"
+          mkdir -p "$PAYLOAD_DIR"
+          ditto "$APP_PATH" "$PAYLOAD_DIR/$(basename "$APP_PATH")"
+          find "$PAYLOAD_DIR" -type d -name _CodeSignature -prune -exec rm -rf {} + || true
+          find "$PAYLOAD_DIR" -type f -name embedded.mobileprovision -delete || true
+          (
+            cd "$OUTPUT_DIR"
+            /usr/bin/zip -qry "$IPA_NAME" Payload
+            shasum -a 256 "$IPA_NAME" > "$IPA_NAME.sha256"
+          )
+          echo "ipa_path=$OUTPUT_DIR/$IPA_NAME" >> "$GITHUB_OUTPUT"
+          echo "sha_path=$OUTPUT_DIR/$IPA_NAME.sha256" >> "$GITHUB_OUTPUT"
+
+      - name: Upload workflow artifact
+        if: steps.ios_build.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Nuvio-iOS-autotrailer-v2-${{ steps.version.outputs.version }}-${{ steps.version.outputs.build }}-${{ github.run_number }}
+          path: |
+            ${{ steps.package.outputs.ipa_path }}
+            ${{ steps.package.outputs.sha_path }}
+            build/xcodebuild.log
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Create GitHub Release
+        if: steps.ios_build.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+          VERSION: ${{ steps.version.outputs.version }}
+          BUILD_NUMBER: ${{ steps.version.outputs.build }}
+          UPSTREAM_SHA: ${{ steps.version.outputs.upstream_sha }}
+          IPA_PATH: ${{ steps.package.outputs.ipa_path }}
+          SHA_PATH: ${{ steps.package.outputs.sha_path }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > release-notes.md <<EOF
+          Custom Nuvio iOS Auto Trailer V2 build from the latest upstream cmp-rewrite source.
+
+          Version: **$VERSION**  
+          Build: **$BUILD_NUMBER**  
+          Upstream commit: **$UPSTREAM_SHA**  
+          Workflow run: **$GITHUB_RUN_NUMBER**
+
+          V2 hero-player change:
+          - Uses a dedicated iOS MPV bridge for the detail-page trailer.
+          - Does not use PlatformPlayerSurface's Compose dp sizing path.
+          - Does not call syncVideoSurfaceLayout for the hero trailer.
+          - UIKit's actual embedded view bounds drive the MPV Metal surface.
+          - Production Supabase login configuration remains included.
+
+          The IPA is **unsigned**. Sign it with your own Apple ID/certificate before sideloading.
+          EOF
+          gh release create "$RELEASE_TAG" \
+            "$IPA_PATH" \
+            "$SHA_PATH" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Nuvio iOS $VERSION (build $BUILD_NUMBER) - Auto Trailer V2 $GITHUB_RUN_NUMBER" \
+            --notes-file release-notes.md \
+            --latest
