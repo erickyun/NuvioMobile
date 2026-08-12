@@ -100,6 +100,63 @@ elif new_linker not in gradle:
 
 gradle_path.write_text(gradle, encoding='utf-8')
 
+# iOS can have hundreds of enabled plugin providers. Upstream StreamsRepository
+# starts every scraper concurrently; each execution creates a native QuickJS
+# runtime. That can cause an iOS process-level crash/OOM before Kotlin Result
+# handling sees an exception. Keep all providers enabled but cap concurrent
+# native QuickJS executions so remaining scrapers queue instead of all starting
+# at once.
+plugin_runtime_path = appstore_plugins / 'runtime/PluginRuntime.kt'
+plugin_runtime = plugin_runtime_path.read_text(encoding='utf-8')
+
+sync_import_anchor = 'import kotlinx.coroutines.withTimeout\n'
+if 'import kotlinx.coroutines.sync.Semaphore' not in plugin_runtime:
+    if sync_import_anchor not in plugin_runtime:
+        raise SystemExit('Could not locate coroutine import anchor in PluginRuntime')
+    plugin_runtime = plugin_runtime.replace(
+        sync_import_anchor,
+        sync_import_anchor + 'import kotlinx.coroutines.sync.Semaphore\nimport kotlinx.coroutines.sync.withPermit\n',
+        1,
+    )
+
+json_anchor = '    private val json = Json { ignoreUnknownKeys = true }\n'
+semaphore_decl = '    private val executionSemaphore = Semaphore(4)\n'
+if semaphore_decl not in plugin_runtime:
+    if json_anchor not in plugin_runtime:
+        raise SystemExit('Could not locate PluginRuntime json field')
+    plugin_runtime = plugin_runtime.replace(json_anchor, json_anchor + semaphore_decl, 1)
+
+old_execute = '''        withTimeout(PLUGIN_TIMEOUT_MS) {
+            executePluginInternal(
+                code = code,
+                tmdbId = tmdbId,
+                mediaType = mediaType,
+                season = season,
+                episode = episode,
+                scraperId = scraperId,
+                scraperSettings = scraperSettingsMap,
+            )
+        }'''
+new_execute = '''        executionSemaphore.withPermit {
+            withTimeout(PLUGIN_TIMEOUT_MS) {
+                executePluginInternal(
+                    code = code,
+                    tmdbId = tmdbId,
+                    mediaType = mediaType,
+                    season = season,
+                    episode = episode,
+                    scraperId = scraperId,
+                    scraperSettings = scraperSettingsMap,
+                )
+            }
+        }'''
+if old_execute in plugin_runtime:
+    plugin_runtime = plugin_runtime.replace(old_execute, new_execute, 1)
+elif new_execute not in plugin_runtime:
+    raise SystemExit('Could not locate executePlugin timeout block')
+
+plugin_runtime_path.write_text(plugin_runtime, encoding='utf-8')
+
 # Sanity checks: real repository/runtime/platform/settings must exist, disabled
 # App Store stubs must not remain, and P2P must stay disabled.
 settings_page = appstore_settings / 'PluginsSettingsPage.kt'
@@ -107,7 +164,7 @@ checks = [
     appstore_plugins / 'PluginRepository.kt',
     appstore_plugins / 'PluginManifestParser.kt',
     appstore_plugins / 'PluginsSettingsScreen.kt',
-    appstore_plugins / 'runtime/PluginRuntime.kt',
+    plugin_runtime_path,
     appstore_plugins / 'runtime/js/JsRuntime.kt',
     appstore_plugins / 'runtime/dom/DomBridge.kt',
     appstore_plugins / 'PluginPlatform.ios.kt',
@@ -131,5 +188,8 @@ if 'implementation(libs.quickjs.kt)' not in patched_gradle or 'implementation(li
     raise SystemExit('Plugin runtime dependencies were not enabled')
 if '"-lc++"' not in patched_gradle or '"Security"' not in patched_gradle:
     raise SystemExit('Native plugin linker options were not enabled')
+patched_runtime = plugin_runtime_path.read_text(encoding='utf-8')
+if 'executionSemaphore = Semaphore(4)' not in patched_runtime or 'executionSemaphore.withPermit' not in patched_runtime:
+    raise SystemExit('QuickJS execution concurrency limit was not installed')
 
-print('Applied real iOS plugin UI/runtime to App Store-based build; P2P remains disabled.')
+print('Applied real iOS plugin UI/runtime with max 4 concurrent QuickJS executions; P2P remains disabled.')
