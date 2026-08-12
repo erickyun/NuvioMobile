@@ -201,15 +201,19 @@ jobs:
 
           bridge_path = Path("iosApp/iosApp/Player/MPVPlayerBridge.swift")
           bridge = bridge_path.read_text(encoding="utf-8")
-          old_frame = """        var targetFrame = view.frame
-          if targetFrame.size != size {
-              targetFrame.size = size
-              view.frame = targetFrame
-          }"""
-          new_frame = """        let targetFrame = CGRect(origin: .zero, size: size)
-          if view.frame != targetFrame {
-              view.frame = targetFrame
-          }"""
+          old_frame = (
+              "        var targetFrame = view.frame\n"
+              "        if targetFrame.size != size {\n"
+              "            targetFrame.size = size\n"
+              "            view.frame = targetFrame\n"
+              "        }"
+          )
+          new_frame = (
+              "        let targetFrame = CGRect(origin: .zero, size: size)\n"
+              "        if view.frame != targetFrame {\n"
+              "            view.frame = targetFrame\n"
+              "        }"
+          )
           if old_frame not in bridge:
               raise SystemExit("Could not locate externally managed MPV view frame code")
           bridge_path.write_text(bridge.replace(old_frame, new_frame, 1), encoding="utf-8")
