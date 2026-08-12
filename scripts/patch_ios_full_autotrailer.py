@@ -133,14 +133,69 @@ actual fun HeroTrailerPlayerSurface(
 }
 ''', encoding='utf-8')
 
+# Preserve the proven iOS plugin stability fix from the plugin-only build.
+# Full mode can expose hundreds of providers; without a limit each scraper may
+# create its own native QuickJS runtime at once, causing a process-level crash.
+plugin_runtime_path = root / 'composeApp/src/fullCommonMain/kotlin/com/nuvio/app/features/plugins/runtime/PluginRuntime.kt'
+plugin_runtime = plugin_runtime_path.read_text(encoding='utf-8')
+
+sync_import_anchor = 'import kotlinx.coroutines.withTimeout\n'
+if 'import kotlinx.coroutines.sync.Semaphore' not in plugin_runtime:
+    if sync_import_anchor not in plugin_runtime:
+        raise SystemExit('Could not locate coroutine import anchor in Full PluginRuntime')
+    plugin_runtime = plugin_runtime.replace(
+        sync_import_anchor,
+        sync_import_anchor + 'import kotlinx.coroutines.sync.Semaphore\nimport kotlinx.coroutines.sync.withPermit\n',
+        1,
+    )
+
+json_anchor = '    private val json = Json { ignoreUnknownKeys = true }\n'
+semaphore_decl = '    private val executionSemaphore = Semaphore(4)\n'
+if semaphore_decl not in plugin_runtime:
+    if json_anchor not in plugin_runtime:
+        raise SystemExit('Could not locate Full PluginRuntime json field')
+    plugin_runtime = plugin_runtime.replace(json_anchor, json_anchor + semaphore_decl, 1)
+
+old_execute = '''        withTimeout(PLUGIN_TIMEOUT_MS) {
+            executePluginInternal(
+                code = code,
+                tmdbId = tmdbId,
+                mediaType = mediaType,
+                season = season,
+                episode = episode,
+                scraperId = scraperId,
+                scraperSettings = scraperSettingsMap,
+            )
+        }'''
+new_execute = '''        executionSemaphore.withPermit {
+            withTimeout(PLUGIN_TIMEOUT_MS) {
+                executePluginInternal(
+                    code = code,
+                    tmdbId = tmdbId,
+                    mediaType = mediaType,
+                    season = season,
+                    episode = episode,
+                    scraperId = scraperId,
+                    scraperSettings = scraperSettingsMap,
+                )
+            }
+        }'''
+if old_execute in plugin_runtime:
+    plugin_runtime = plugin_runtime.replace(old_execute, new_execute, 1)
+elif new_execute not in plugin_runtime:
+    raise SystemExit('Could not locate Full executePlugin timeout block')
+
+plugin_runtime_path.write_text(plugin_runtime, encoding='utf-8')
+
 full_plugins_page = root / 'composeApp/src/fullCommonMain/kotlin/com/nuvio/app/features/settings/PluginsSettingsPage.kt'
 p2p_file = root / 'composeApp/src/iosFull/kotlin/com/nuvio/app/features/p2p/P2pStreamingEngine.ios.kt'
 
-if 'actual val pluginsEnabled: Boolean = true' not in policy_path.read_text(encoding='utf-8'):
+patched_policy = policy_path.read_text(encoding='utf-8')
+if 'actual val pluginsEnabled: Boolean = true' not in patched_policy:
     raise SystemExit('Full plugins policy is not enabled')
-if 'actual val p2pEnabled: Boolean = true' not in policy_path.read_text(encoding='utf-8'):
+if 'actual val p2pEnabled: Boolean = true' not in patched_policy:
     raise SystemExit('Full P2P policy is not enabled')
-if 'actual val heroTrailerPlaybackSupported: Boolean = true' not in policy_path.read_text(encoding='utf-8'):
+if 'actual val heroTrailerPlaybackSupported: Boolean = true' not in patched_policy:
     raise SystemExit('Hero trailer policy patch failed')
 if 'PluginsSettingsPageContent' not in full_plugins_page.read_text(encoding='utf-8'):
     raise SystemExit('Real Full plugin settings page is missing')
@@ -148,5 +203,8 @@ if not p2p_file.is_file():
     raise SystemExit('iOS Full P2P engine implementation is missing')
 if 'NuvioPlayerBridgeFactory.create()' not in hero_path.read_text(encoding='utf-8'):
     raise SystemExit('Dedicated Full iOS hero player patch failed')
+patched_runtime = plugin_runtime_path.read_text(encoding='utf-8')
+if 'executionSemaphore = Semaphore(4)' not in patched_runtime or 'executionSemaphore.withPermit' not in patched_runtime:
+    raise SystemExit('Full QuickJS execution concurrency limit was not installed')
 
-print('Applied real iOS Full + Auto Trailer V2 patch. Plugins/P2P stay native Full implementations.')
+print('Applied iOS Full + P2P + Auto Trailer V2 with max 4 concurrent QuickJS plugin executions.')
