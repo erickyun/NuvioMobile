@@ -1,0 +1,48 @@
+name: Patch Trailer V3 Supabase Source
+
+on:
+  push:
+    branches:
+      - cmp-rewrite
+    paths:
+      - .github/workflows/patch-trailer-v3-supabase-source.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: cmp-rewrite
+          fetch-depth: 1
+
+      - name: Use known-good official APK for public Supabase config
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('.github/workflows/ios-ipa-full-trailer-v3-p2p.yml')
+          text = path.read_text(encoding='utf-8')
+          old = '"https://github.com/NuvioMedia/NuvioMobile/releases/download/${VERSION}/androidApp-full-arm64-v8a-release.apk"'
+          new = '"https://github.com/NuvioMedia/NuvioMobile/releases/download/0.4.4/androidApp-full-arm64-v8a-release.apk"'
+          if new not in text:
+              if old not in text:
+                  raise SystemExit('Could not locate dynamic official APK URL')
+              text = text.replace(old, new, 1)
+          path.write_text(text, encoding='utf-8')
+          PY
+
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add .github/workflows/ios-ipa-full-trailer-v3-p2p.yml
+          if git diff --cached --quiet; then
+            echo 'Trailer V3 workflow already uses the stable config source.'
+            exit 0
+          fi
+          git commit -m 'fix: use stable 0.4.4 APK for Supabase config extraction'
+          git push origin HEAD:cmp-rewrite
