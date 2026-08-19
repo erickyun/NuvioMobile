@@ -23,6 +23,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          echo 'Patching Trailer V3 workflow config source...'
           python3 - <<'PY'
           from pathlib import Path
 
