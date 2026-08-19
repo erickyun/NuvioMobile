@@ -1,0 +1,322 @@
+name: Build Nuvio 0.4.4 + Trailer V3 + Plugins + P2P IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - cmp-rewrite
+    paths:
+      - .github/workflows/ios-ipa-044-trailer-v3-p2p.yml
+      - scripts/patch_ios_full_autotrailer.py
+      - scripts/patch_ios_youtube_trailer_v3.py
+      - scripts/extract_official_supabase.py
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ios-nuvio-custom-full
+  cancel-in-progress: true
+
+jobs:
+  build-and-release:
+    name: Build pinned 0.4.4 Full + Trailer V3 + Plugins + P2P
+    runs-on: macos-15
+    timeout-minutes: 360
+    env:
+      NUVIO_IOS_DISTRIBUTION: full
+      NUVIO_MOBILE_SHA: f9ad843b14cd3be7fa3ddb800b6961233e0e5b56
+      MPVKIT_SHA: d5cf091c80368bbbc1bbf2d195fbc55d926df888
+      NUVIO_ENGINE_SHA: 772f8c055049def5e87ae5ddb17b4ad15a71085a
+
+    steps:
+      - name: Checkout fork helpers
+        uses: actions/checkout@v4
+        with:
+          ref: cmp-rewrite
+          fetch-depth: 1
+
+      - name: Preserve and syntax-check helper scripts
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp scripts/patch_ios_full_autotrailer.py "$RUNNER_TEMP/patch_ios_full_autotrailer.py"
+          cp scripts/patch_ios_youtube_trailer_v3.py "$RUNNER_TEMP/patch_ios_youtube_trailer_v3.py"
+          cp scripts/extract_official_supabase.py "$RUNNER_TEMP/extract_official_supabase.py"
+          python3 -m py_compile \
+            "$RUNNER_TEMP/patch_ios_full_autotrailer.py" \
+            "$RUNNER_TEMP/patch_ios_youtube_trailer_v3.py" \
+            "$RUNNER_TEMP/extract_official_supabase.py"
+
+      - name: Checkout pinned NuvioMobile 0.4.4 source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git remote remove upstream 2>/dev/null || true
+          git remote add upstream https://github.com/NuvioMedia/NuvioMobile.git
+          git -c submodule.recurse=false fetch --depth 1 --no-tags --no-recurse-submodules upstream "$NUVIO_MOBILE_SHA"
+          git -c submodule.recurse=false checkout --detach FETCH_HEAD
+          test "$(git rev-parse HEAD)" = "$NUVIO_MOBILE_SHA"
+          grep -q '^MARKETING_VERSION=0.4.4$' iosApp/Configuration/Version.xcconfig
+          grep -q '^CURRENT_PROJECT_VERSION=108$' iosApp/Configuration/Version.xcconfig
+          echo "Pinned NuvioMobile: $(git rev-parse HEAD)"
+
+      - name: Checkout pinned MPVKit
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf MPVKit
+          git clone --quiet https://github.com/NuvioMedia/MPVKit.git MPVKit
+          git -C MPVKit checkout --quiet "$MPVKIT_SHA"
+          test "$(git -C MPVKit rev-parse HEAD)" = "$MPVKIT_SHA"
+          echo "Pinned MPVKit: $(git -C MPVKit rev-parse HEAD)"
+
+      - name: Checkout pinned Nuvio Engine
+        id: engine
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf ../nuvio-engine
+          git clone --quiet https://github.com/NuvioMedia/nuvio-engine.git ../nuvio-engine
+          git -C ../nuvio-engine checkout --quiet "$NUVIO_ENGINE_SHA"
+          test "$(git -C ../nuvio-engine rev-parse HEAD)" = "$NUVIO_ENGINE_SHA"
+          echo "sha=$NUVIO_ENGINE_SHA" >> "$GITHUB_OUTPUT"
+          echo "Pinned Nuvio Engine: $NUVIO_ENGINE_SHA"
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: Select Xcode 26.3
+        run: sudo xcode-select -s /Applications/Xcode_26.3.app/Contents/Developer
+
+      - name: Read pinned version information
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION=0.4.4
+          BUILD=108
+          SHORT_SHA="$(git rev-parse --short=8 HEAD)"
+          TAG="ios-v${VERSION}-b${BUILD}-${SHORT_SHA}-trailer-v3-p2p-${GITHUB_RUN_NUMBER}"
+          IPA_NAME="Nuvio-${VERSION}-build-${BUILD}-trailer-v3-plugins-p2p-${GITHUB_RUN_NUMBER}-unsigned.ipa"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "build=$BUILD" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "ipa_name=$IPA_NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Apply proven Full + Auto Trailer + Plugin patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 "$RUNNER_TEMP/patch_ios_full_autotrailer.py"
+
+      - name: Apply corrected Kotlin YouTube Trailer V3 patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 "$RUNNER_TEMP/patch_ios_youtube_trailer_v3.py"
+
+          POLICY="composeApp/src/iosFull/kotlin/com/nuvio/app/core/build/AppFeaturePolicy.ios.kt"
+          EXTRACTOR="composeApp/src/fullCommonMain/kotlin/com/nuvio/app/features/trailer/InAppYouTubeExtractor.kt"
+          PLATFORM="composeApp/src/iosFull/kotlin/com/nuvio/app/features/trailer/TrailerExtractionPlatform.ios.kt"
+          POPUP="composeApp/src/commonMain/kotlin/com/nuvio/app/features/details/components/TrailerPlayerPopup.kt"
+          SOURCE="composeApp/src/commonMain/kotlin/com/nuvio/app/features/trailer/TrailerPlaybackSource.kt"
+
+          grep -Fq 'actual val pluginsEnabled: Boolean = true' "$POLICY"
+          grep -Fq 'actual val p2pEnabled: Boolean = true' "$POLICY"
+          grep -Fq 'actual val heroTrailerPlaybackSupported: Boolean = true' "$POLICY"
+          grep -Fq 'key = "mweb"' "$EXTRACTOR"
+          grep -Fq 'PREFERRED_SEPARATE_CLIENT = "mweb"' "$EXTRACTOR"
+          grep -Fq 'compareBy<StreamCandidate> { if (it.hasN) 1 else 0 }' "$EXTRACTOR"
+          grep -Fq 'private val youtubePlaybackHeaders' "$PLATFORM"
+          grep -Fq 'sourceHeaders = playbackSource.headers' "$POPUP"
+          grep -Fq 'val headers: Map<String, String> = emptyMap()' "$SOURCE"
+
+          if grep -Fq '\"mweb\"' "$EXTRACTOR"; then
+            echo 'Invalid literal escaped quotes found in generated Kotlin.' >&2
+            exit 1
+          fi
+          echo 'Pinned 0.4.4 + Trailer V3 patch validated.'
+
+      - name: Import production Supabase config from known-good official 0.4.4 APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK="$RUNNER_TEMP/nuvio-official-0.4.4.apk"
+          CONFIG_ENV="$RUNNER_TEMP/nuvio-supabase.env"
+          curl --fail --location --retry 5 --retry-all-errors \
+            "https://github.com/NuvioMedia/NuvioMobile/releases/download/0.4.4/androidApp-full-arm64-v8a-release.apk" \
+            --output "$APK"
+          python3 "$RUNNER_TEMP/extract_official_supabase.py" "$APK" "$CONFIG_ENV"
+          set -a
+          source "$CONFIG_ENV"
+          set +a
+          echo "::add-mask::$NUVIO_SUPABASE_ANON_KEY"
+          cat > local.properties <<EOF
+          NUVIO_SUPABASE_URL=$NUVIO_SUPABASE_URL
+          NUVIO_SUPABASE_ANON_KEY=$NUVIO_SUPABASE_ANON_KEY
+          NUVIO_SUPABASE_FALLBACK_URL=$NUVIO_SUPABASE_FALLBACK_URL
+          NUVIO_IOS_DISTRIBUTION=full
+          EOF
+          grep -Eq '^NUVIO_SUPABASE_URL=https://.+' local.properties
+          grep -Eq '^NUVIO_SUPABASE_ANON_KEY=.+' local.properties
+          grep -q '^NUVIO_IOS_DISTRIBUTION=full$' local.properties
+
+      - name: Restore pinned Nuvio Engine Apple cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ../nuvio-engine/platform/apple/.deps
+            ../nuvio-engine/platform/apple/build
+            ../nuvio-engine/platform/apple/NuvioEngine.xcframework
+          key: nuvio-engine-apple-pinned-${{ runner.os }}-${{ runner.arch }}-xcode263-${{ env.NUVIO_ENGINE_SHA }}
+
+      - name: Build pinned Nuvio Engine Apple XCFramework
+        shell: bash
+        run: |
+          set -euo pipefail
+          IOS_LIB="../nuvio-engine/platform/apple/NuvioEngine.xcframework/ios-arm64/libCNuvioEngine.a"
+          SIM_LIB="../nuvio-engine/platform/apple/NuvioEngine.xcframework/ios-arm64_x86_64-simulator/libCNuvioEngine.a"
+          if [[ -f "$IOS_LIB" && -f "$SIM_LIB" ]]; then
+            echo 'Using cached pinned Nuvio Engine XCFramework.'
+          else
+            command -v cmake >/dev/null 2>&1 || brew install cmake
+            command -v ninja >/dev/null 2>&1 || brew install ninja
+            chmod +x ../nuvio-engine/scripts/*.sh
+            (
+              cd ../nuvio-engine
+              NUVIO_BUILD_JOBS=4 ./scripts/build-apple-xcframework.sh
+            )
+          fi
+          test -s "$IOS_LIB"
+          test -s "$SIM_LIB"
+
+      - name: Restore Xcode DerivedData cache
+        uses: actions/cache@v4
+        with:
+          path: build/DerivedData
+          key: nuvio-ios-044-trailer-v3-${{ runner.os }}-${{ runner.arch }}-${{ env.NUVIO_MOBILE_SHA }}-${{ env.NUVIO_ENGINE_SHA }}
+
+      - name: Prepare build environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x gradlew
+          xcodebuild -version
+          java -version
+          ./gradlew --version
+
+      - name: Build unsigned iOS application
+        id: ios_build
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build
+          set -o pipefail
+          xcodebuild \
+            -project iosApp/iosApp.xcodeproj \
+            -scheme iosApp \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination "generic/platform=iOS" \
+            -derivedDataPath "$PWD/build/DerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            DEVELOPMENT_TEAM="" \
+            COMPILER_INDEX_STORE_ENABLE=NO \
+            build | tee build/xcodebuild.log
+
+      - name: Upload failed Xcode log
+        if: always() && steps.ios_build.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Nuvio-iOS-044-trailer-v3-failed-log
+          path: build/xcodebuild.log
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Fail when Xcode build failed
+        if: steps.ios_build.outcome == 'failure'
+        shell: bash
+        run: |
+          tail -n 500 build/xcodebuild.log || true
+          exit 1
+
+      - name: Package IPA
+        if: steps.ios_build.outcome == 'success'
+        id: package
+        env:
+          IPA_NAME: ${{ steps.version.outputs.ipa_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          PRODUCTS_DIR="$PWD/build/DerivedData/Build/Products/Release-iphoneos"
+          APP_PATH="$(find "$PRODUCTS_DIR" -maxdepth 1 -type d -name '*.app' -print -quit)"
+          test -n "$APP_PATH"
+          test -d "$APP_PATH"
+          OUTPUT_DIR="$PWD/output"
+          PAYLOAD_DIR="$OUTPUT_DIR/Payload"
+          rm -rf "$PAYLOAD_DIR"
+          mkdir -p "$PAYLOAD_DIR"
+          ditto "$APP_PATH" "$PAYLOAD_DIR/$(basename "$APP_PATH")"
+          find "$PAYLOAD_DIR" -type d -name _CodeSignature -prune -exec rm -rf {} + || true
+          find "$PAYLOAD_DIR" -type f -name embedded.mobileprovision -delete || true
+          (
+            cd "$OUTPUT_DIR"
+            /usr/bin/zip -qry "$IPA_NAME" Payload
+            shasum -a 256 "$IPA_NAME" > "$IPA_NAME.sha256"
+          )
+          echo "ipa_path=$OUTPUT_DIR/$IPA_NAME" >> "$GITHUB_OUTPUT"
+          echo "sha_path=$OUTPUT_DIR/$IPA_NAME.sha256" >> "$GITHUB_OUTPUT"
+
+      - name: Upload workflow artifact
+        if: steps.ios_build.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Nuvio-iOS-044-trailer-v3-plugins-p2p-${{ github.run_number }}
+          path: |
+            ${{ steps.package.outputs.ipa_path }}
+            ${{ steps.package.outputs.sha_path }}
+            build/xcodebuild.log
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Create GitHub Release
+        if: steps.ios_build.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+          IPA_PATH: ${{ steps.package.outputs.ipa_path }}
+          SHA_PATH: ${{ steps.package.outputs.sha_path }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > release-notes.md <<EOF
+          Nuvio iOS 0.4.4 build 108, pinned to the known-good source used by the earlier working custom IPA.
+
+          NuvioMobile: $NUVIO_MOBILE_SHA
+          MPVKit: $MPVKIT_SHA
+          Nuvio Engine: $NUVIO_ENGINE_SHA
+
+          Included:
+          - Existing Nuvio UI unchanged.
+          - Login / production Supabase configuration.
+          - Real Full plugins and configurable QuickJS concurrency.
+          - Nuvio Engine + P2P.
+          - Auto Trailer.
+          - Corrected Kotlin YouTube Trailer V3: MWEB-first, HLS-first, reachability probes and MPV YouTube headers.
+
+          The IPA is unsigned.
+          EOF
+          gh release create "$RELEASE_TAG" \
+            "$IPA_PATH" \
+            "$SHA_PATH" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Nuvio iOS 0.4.4 build 108 - Trailer V3 + Plugins + P2P $GITHUB_RUN_NUMBER" \
+            --notes-file release-notes.md
