@@ -1,4 +1,4 @@
-name: Build Nuvio 0.4.4 + Trailer V3 + Plugins + P2P IPA
+name: Build Nuvio 0.4.4 + Trailer V3 + Trailer Quality + Plugins + P2P IPA
 
 on:
   workflow_dispatch:
@@ -9,6 +9,7 @@ on:
       - .github/workflows/ios-ipa-044-trailer-v3-p2p.yml
       - scripts/patch_ios_full_autotrailer.py
       - scripts/patch_ios_youtube_trailer_v3.py
+      - scripts/patch_ios_trailer_quality.py
       - scripts/extract_official_supabase.py
 
 permissions:
@@ -20,7 +21,7 @@ concurrency:
 
 jobs:
   build-and-release:
-    name: Build pinned 0.4.4 Full + Trailer V3 + Plugins + P2P
+    name: Build pinned 0.4.4 Full + Trailer V3 + Quality + Plugins + P2P
     runs-on: macos-15
     timeout-minutes: 360
     env:
@@ -42,10 +43,12 @@ jobs:
           set -euo pipefail
           cp scripts/patch_ios_full_autotrailer.py "$RUNNER_TEMP/patch_ios_full_autotrailer.py"
           cp scripts/patch_ios_youtube_trailer_v3.py "$RUNNER_TEMP/patch_ios_youtube_trailer_v3.py"
+          cp scripts/patch_ios_trailer_quality.py "$RUNNER_TEMP/patch_ios_trailer_quality.py"
           cp scripts/extract_official_supabase.py "$RUNNER_TEMP/extract_official_supabase.py"
           python3 -m py_compile \
             "$RUNNER_TEMP/patch_ios_full_autotrailer.py" \
             "$RUNNER_TEMP/patch_ios_youtube_trailer_v3.py" \
+            "$RUNNER_TEMP/patch_ios_trailer_quality.py" \
             "$RUNNER_TEMP/extract_official_supabase.py"
 
       - name: Checkout pinned NuvioMobile 0.4.4 source
@@ -101,8 +104,8 @@ jobs:
           VERSION=0.4.4
           BUILD=108
           SHORT_SHA="$(git rev-parse --short=8 HEAD)"
-          TAG="ios-v${VERSION}-b${BUILD}-${SHORT_SHA}-trailer-v3-p2p-${GITHUB_RUN_NUMBER}"
-          IPA_NAME="Nuvio-${VERSION}-build-${BUILD}-trailer-v3-plugins-p2p-${GITHUB_RUN_NUMBER}-unsigned.ipa"
+          TAG="ios-v${VERSION}-b${BUILD}-${SHORT_SHA}-trailer-quality-${GITHUB_RUN_NUMBER}"
+          IPA_NAME="Nuvio-${VERSION}-build-${BUILD}-trailer-v3-quality-plugins-p2p-${GITHUB_RUN_NUMBER}-unsigned.ipa"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "build=$BUILD" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
@@ -141,6 +144,26 @@ jobs:
             exit 1
           fi
           echo 'Pinned 0.4.4 + Trailer V3 patch validated.'
+
+      - name: Add persistent Trailer Quality setting
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 "$RUNNER_TEMP/patch_ios_trailer_quality.py"
+
+          META_REPO="composeApp/src/commonMain/kotlin/com/nuvio/app/features/details/MetaScreenSettingsRepository.kt"
+          META_PAGE="composeApp/src/commonMain/kotlin/com/nuvio/app/features/settings/MetaScreenSettingsPage.kt"
+          EXTRACTOR="composeApp/src/fullCommonMain/kotlin/com/nuvio/app/features/trailer/InAppYouTubeExtractor.kt"
+
+          grep -Fq 'val trailerQuality: TrailerQuality = TrailerQuality.Auto' "$META_REPO"
+          grep -Fq '@SerialName("trailer_quality")' "$META_REPO"
+          grep -Fq 'fun setTrailerQuality(quality: TrailerQuality)' "$META_REPO"
+          grep -Fq 'private fun TrailerQualitySelector(' "$META_PAGE"
+          grep -Fq 'Auto (Recommended)' "$META_PAGE"
+          grep -Fq 'parseHlsManifest(manifestUrl, trailerQuality.maxHeight)' "$EXTRACTOR"
+          grep -Fq 'if (trailerQuality == TrailerQuality.Auto) manifestUrl else variant.url' "$EXTRACTOR"
+          grep -Fq 'private fun pickCandidateForQuality(' "$EXTRACTOR"
+          echo 'Trailer Quality setting validated: Auto / Highest / 1080p / 720p / 480p / 360p.'
 
       - name: Import production Supabase config from known-good official 0.4.4 APK
         shell: bash
@@ -199,7 +222,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: build/DerivedData
-          key: nuvio-ios-044-trailer-v3-${{ runner.os }}-${{ runner.arch }}-${{ env.NUVIO_MOBILE_SHA }}-${{ env.NUVIO_ENGINE_SHA }}
+          key: nuvio-ios-044-trailer-quality-v1-${{ runner.os }}-${{ runner.arch }}-${{ env.NUVIO_MOBILE_SHA }}-${{ env.NUVIO_ENGINE_SHA }}
 
       - name: Prepare build environment
         shell: bash
@@ -236,7 +259,7 @@ jobs:
         if: always() && steps.ios_build.outcome == 'failure'
         uses: actions/upload-artifact@v4
         with:
-          name: Nuvio-iOS-044-trailer-v3-failed-log
+          name: Nuvio-iOS-044-trailer-quality-failed-log
           path: build/xcodebuild.log
           if-no-files-found: error
           retention-days: 30
@@ -279,7 +302,7 @@ jobs:
         if: steps.ios_build.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
-          name: Nuvio-iOS-044-trailer-v3-plugins-p2p-${{ github.run_number }}
+          name: Nuvio-iOS-044-trailer-quality-plugins-p2p-${{ github.run_number }}
           path: |
             ${{ steps.package.outputs.ipa_path }}
             ${{ steps.package.outputs.sha_path }}
@@ -305,12 +328,14 @@ jobs:
           Nuvio Engine: $NUVIO_ENGINE_SHA
 
           Included:
-          - Existing Nuvio UI unchanged.
+          - Existing Nuvio UI/layout unchanged.
           - Login / production Supabase configuration.
           - Real Full plugins and configurable QuickJS concurrency.
           - Nuvio Engine + P2P.
-          - Auto Trailer.
-          - Corrected Kotlin YouTube Trailer V3: MWEB-first, HLS-first, reachability probes and MPV YouTube headers.
+          - Auto Trailer + Kotlin YouTube Trailer V3.
+          - Persistent Trailer Quality setting shared by Hero and normal Trailer playback.
+          - Quality choices: Auto, Highest, 1080p, 720p, 480p, 360p.
+          - Auto keeps adaptive HLS; fixed quality selects the best available variant at or below the requested resolution.
 
           The IPA is unsigned.
           EOF
@@ -318,5 +343,5 @@ jobs:
             "$IPA_PATH" \
             "$SHA_PATH" \
             --repo "$GITHUB_REPOSITORY" \
-            --title "Nuvio iOS 0.4.4 build 108 - Trailer V3 + Plugins + P2P $GITHUB_RUN_NUMBER" \
+            --title "Nuvio iOS 0.4.4 build 108 - Trailer Quality + Plugins + P2P $GITHUB_RUN_NUMBER" \
             --notes-file release-notes.md
